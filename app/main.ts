@@ -81,6 +81,7 @@ class Circle implements Shape {
         if (!thisBox.intersects(otherBox)) {
             return false;
         }
+        // Для простоты используем пересечение bounding box
         return true;
     }
 
@@ -120,6 +121,7 @@ class Polygon implements Shape {
         if (!thisBox.intersects(otherBox)) {
             return false;
         }
+        // Для простоты используем пересечение bounding box
         return true;
     }
 
@@ -129,6 +131,7 @@ class Polygon implements Shape {
         if (!thisBox.contains(otherBox)) {
             return false;
         }
+        // Для простоты предполагаем, что containment основан на bounding box
         return true;
     }
 
@@ -203,9 +206,16 @@ class RTreeNode<T> {
     }
 
     split(): [RTreeNode<T>, RTreeNode<T>] {
-        const mid = Math.floor(this.elements.length / 2);
-        const leftElements = this.elements.slice(0, mid);
-        const rightElements = this.elements.slice(mid);
+        // Используем линейное разделение для простоты
+        const sortedElements = this.elements.slice().sort((a, b) => {
+            const aMBR = a.getBoundingBox();
+            const bMBR = b.getBoundingBox();
+            return aMBR.minX - bMBR.minX;
+        });
+
+        const mid = Math.floor(sortedElements.length / 2);
+        const leftElements = sortedElements.slice(0, mid);
+        const rightElements = sortedElements.slice(mid);
 
         const leftNode = new RTreeNode<T>(this.isLeaf);
         leftElements.forEach((element: TreeElement<T>) => {
@@ -245,6 +255,7 @@ class RTree<T extends { id: number; name: string }> {
         if (node.isLeaf) {
             node.addElement(element);
         } else {
+            // Выбираем наилучший элемент для расширения MBR
             let bestFitElement: TreeElement<T> | undefined;
             let minAreaIncrease = Infinity;
 
@@ -269,11 +280,12 @@ class RTree<T extends { id: number; name: string }> {
 
             if (bestFitElement && bestFitElement.child) {
                 this._insert(element, bestFitElement.child);
+                // Обновляем MBR родительского элемента
                 bestFitElement.shape.getBoundingBox().expandToInclude(element.shape);
 
                 if (bestFitElement.child.elements.length > this.maxEntries) {
                     const [left, right] = bestFitElement.child.split();
-                    node.elements = node.elements.filter((e: TreeElement<T>) => e !== bestFitElement);
+                    node.removeElement(bestFitElement);
                     if (left.getMBR()) {
                         node.addElement(new TreeElement<T>(left.getMBR()!, left, null));
                     }
@@ -339,32 +351,34 @@ class RTree<T extends { id: number; name: string }> {
     }
 
     deleteById(id: number): boolean {
-        const path: { node: RTreeNode<T>; parentElement: TreeElement<T> | null }[] = [];
+        const path: RTreeNode<T>[] = [];
         const element = this._findElementById(id, this.root, path);
         if (element) {
-            const leafNode = path[path.length - 1].node;
+            const leafNode = path[path.length - 1];
             leafNode.removeElement(element);
-
             this._condenseTree(path);
-
-            if (this.root.elements.length === 1 && !this.root.isLeaf) {
-                this.root = this.root.elements[0].child!;
+            if (this.root.elements.length === 0 && !this.root.isLeaf) {
+                // Если корневой узел стал пустым, сделаем одним из детей новым корнем
+                // @ts-ignore
+                if (this.root.elements.length === 1 && this.root.elements[0].child) {
+                    this.root = this.root.elements[0].child;
+                    this.root.parent = null;
+                }
             }
-
             return true;
         }
         return false;
     }
 
-    private _findElementById(id: number, node: RTreeNode<T>, path: { node: RTreeNode<T>; parentElement: TreeElement<T> | null }[]): TreeElement<T> | null {
+    private _findElementById(id: number, node: RTreeNode<T>, path: RTreeNode<T>[]): TreeElement<T> | null {
         for (const element of node.elements) {
             if (node.isLeaf && element.data !== null) {
                 if (element.data.id === id) {
-                    path.push({ node, parentElement: null });
+                    path.push(node);
                     return element;
                 }
             } else if (element.child) {
-                path.push({ node, parentElement: element });
+                path.push(node);
                 const result = this._findElementById(id, element.child, path);
                 if (result !== null) {
                     return result;
@@ -375,33 +389,37 @@ class RTree<T extends { id: number; name: string }> {
         return null;
     }
 
-    private _condenseTree(path: { node: RTreeNode<T>; parentElement: TreeElement<T> | null }[]): void {
-        const eliminatedNodes: RTreeNode<T>[] = [];
+    private _condenseTree(path: RTreeNode<T>[]): void {
+        const Q: TreeElement<T>[] = [];
         for (let i = path.length - 1; i >= 0; i--) {
-            const { node, parentElement } = path[i];
+            const node = path[i];
             if (node !== this.root && node.elements.length < this.minEntries) {
-                if (parentElement && node.parent) {
-                    node.parent.removeElement(parentElement);
-                }
-                eliminatedNodes.push(node);
-            } else {
-                if (node.elements.length > 0) {
-                    const mbr = node.getMBR();
+                // Удаляем узел из родительского узла
+                const parent = node.parent;
+                if (parent) {
+                    const parentElement = parent.elements.find(el => el.child === node);
                     if (parentElement) {
-                        parentElement.shape = mbr!;
+                        parent.removeElement(parentElement);
+                    }
+                }
+                // Собираем элементы для повторной вставки
+                Q.push(...node.elements);
+            } else {
+                // Обновляем MBR родительских узлов
+                const mbr = node.getMBR();
+                if (mbr && node.parent) {
+                    const parentElement = node.parent.elements.find(el => el.child === node);
+                    if (parentElement) {
+                        parentElement.shape = mbr;
                     }
                 }
             }
         }
 
-        for (const node of eliminatedNodes) {
-            for (const element of node.elements) {
-                if (element.child) {
-                    element.child.parent = null;
-                }
-                this._insert(element, this.root);
-            }
-        }
+        // Повторно вставляем элементы
+        Q.forEach(element => {
+            this._insert(element, this.root);
+        });
     }
 
     updateById(id: number, newShape: Shape): boolean {
@@ -412,6 +430,30 @@ class RTree<T extends { id: number; name: string }> {
             return true;
         }
         return false;
+    }
+
+    printTree(): void {
+        this._printNode(this.root, 0);
+    }
+
+    private _printNode(node: RTreeNode<T>, level: number): void {
+        const indent = '  '.repeat(level);
+        const mbr = node.getMBR();
+        console.log(`${indent}${node.isLeaf ? 'Leaf' : 'Internal'} Node - Level ${level}`);
+        if (mbr) {
+            console.log(`${indent}  MBR: (${mbr.minX}, ${mbr.minY}) - (${mbr.maxX}, ${mbr.maxY})`);
+        }
+        console.log(`${indent}  Number of Elements: ${node.elements.length}`);
+        node.elements.forEach((element, index) => {
+            if (node.isLeaf) {
+                console.log(`${indent}  Element ${index + 1}: ID=${element.data?.id}, Name=${element.data?.name}`);
+            } else {
+                console.log(`${indent}  Element ${index + 1}: ShapeType=${element.shape.constructor.name}`);
+                if (element.child) {
+                    this._printNode(element.child, level + 1);
+                }
+            }
+        });
     }
 }
 
@@ -453,7 +495,7 @@ function generateRandomShape(id: number): { data: DataObject; shape: Shape } {
     }
 }
 
-const TOTAL_OBJECTS = 200000;
+const TOTAL_OBJECTS = 2000;
 console.time("Вставка элементов");
 for (let i = 1; i <= TOTAL_OBJECTS; i++) {
     const obj = generateRandomShape(i);
@@ -462,24 +504,8 @@ for (let i = 1; i <= TOTAL_OBJECTS; i++) {
 }
 console.timeEnd("Вставка элементов");
 
-const searchShape = new BoundingBox(20, 20, 200, 200);
-console.time("Поиск объектов в R-дереве");
-const found = rtree.search(searchShape);
-console.timeEnd("Поиск объектов в R-дереве");
-
-console.time("Поиск объектов в массиве");
-const foundInArray = objectArray.filter(obj => obj.shape.intersects(searchShape));
-console.timeEnd("Поиск объектов в массиве");
-
-console.log(`\nОбъекты, пересекающиеся с областью (${searchShape.minX}, ${searchShape.minY}) - (${searchShape.maxX}, ${searchShape.maxY}):`);
-found.slice(0, 10).forEach(obj => {
-    console.log(`- ID: ${obj.id}, Name: ${obj.name}`);
-});
-if (found.length > 10) {
-    console.log(`... и ещё ${found.length - 10} объектов.`);
-}
-
-const searchId = 100000;
+// Поиск объекта по ID до удаления
+const searchId = 1000;
 console.time(`Поиск объекта с ID ${searchId} в R-дереве`);
 const foundById = rtree.searchById(searchId);
 console.timeEnd(`Поиск объекта с ID ${searchId} в R-дереве`);
@@ -490,18 +516,30 @@ if (foundById) {
     console.log(`\nОбъект с ID ${searchId} не найден в R-дереве.`);
 }
 
-const deleteId = 100000;
-console.time(`Удаление объекта с ID ${deleteId} из R-дерева`);
-const deleteResult = rtree.deleteById(deleteId);
-console.timeEnd(`Удаление объекта с ID ${deleteId} из R-дерева`);
+// Удаление объектов из R-дерева
+console.time(`Удаление объектов из R-дерева`);
+for (let i = 10; i <= TOTAL_OBJECTS; i++) {
+    const deleteId = i;
+    const deleteResult = rtree.deleteById(deleteId);
 
-if (deleteResult) {
-    console.log(`\nОбъект с ID ${deleteId} успешно удалён из R-дерева.`);
-} else {
-    console.log(`\nОбъект с ID ${deleteId} не найден в R-дереве.`);
+    if (!deleteResult) {
+        console.log(`\nОбъект с ID ${deleteId} не найден в R-дереве.`);
+    }
 }
+console.timeEnd(`Удаление объектов из R-дерева`);
 
-const updateId = 150000;
+// Проверка оставшихся элементов
+console.time("Проверка оставшихся элементов в R-дереве");
+const remainingElements = rtree.search(new BoundingBox(-Infinity, -Infinity, Infinity, Infinity));
+console.timeEnd("Проверка оставшихся элементов в R-дереве");
+
+console.log(`\nОставшиеся объекты после удаления (должны быть с ID 1-9):`);
+remainingElements.forEach(obj => {
+    console.log(`- ID: ${obj.id}, Name: ${obj.name}`);
+});
+
+// Обновление элемента
+const updateId = 5;
 const newShape = new Circle(500, 500, 100);
 console.time(`Обновление объекта с ID ${updateId} в R-дереве`);
 const updateResult = rtree.updateById(updateId, newShape);
@@ -512,6 +550,11 @@ if (updateResult) {
 } else {
     console.log(`\nОбъект с ID ${updateId} не найден в R-дереве.`);
 }
+
+// Вывод всего дерева в консоль
+console.time("Вывод R-дерева в консоль");
+rtree.printTree();
+console.timeEnd("Вывод R-дерева в консоль");
 
 function convertRTreeToJSON<T>(node: RTreeNode<T>, level: number = 0): any {
     const nodeType = node.isLeaf ? 'Leaf' : 'Internal';
